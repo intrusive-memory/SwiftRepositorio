@@ -27,6 +27,13 @@ final class FixtureRepository {
     let root: URL
     private var handle: OpaquePointer?
 
+    /// The repository handle, for helpers in other files of this test target.
+    ///
+    /// Test-target-internal only. Nothing in the library exposes a raw handle, and
+    /// nothing should — this exists because the fixture builder is deliberately
+    /// split across files and `private` does not cross a file boundary.
+    var handleForTests: OpaquePointer? { handle }
+
     /// Fixed identity and timestamp, so a fixture's commit SHA is deterministic
     /// for identical content. A test that depended on `git_signature_now` would
     /// produce a different SHA every run, and nothing here needs wall-clock time.
@@ -202,7 +209,9 @@ final class FixtureRepository {
 
     // MARK: - Plumbing
 
-    private func check(_ code: Int32, _ operation: String) throws {
+    /// Internal, not private: the fixture builder is split across files and
+    /// `setConfig` in BlobReader.swift needs the same error handling.
+    func check(_ code: Int32, _ operation: String) throws {
         guard code < 0 else { return }
         // Same thread as the failing call, for the same reason the library's own
         // `gitCall` does it there — see GitError.swift.

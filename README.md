@@ -22,9 +22,9 @@ decides whether the rest is possible at all.
 | `scripts/verify-no-spawn.sh` — the no-spawn / no-ucontext gate | **PASS, 6 targets, 0 failures**; also self-tested against positive and negative controls |
 | `--fetch-only` pre-gate | passes clean for all three slices, including cold download, checksum rejection and re-extract |
 | `--configure-only` pre-gate | libgit2 + libssh2 configure clean; all three slices verified |
-| `Package.swift` + `Sources/` | `Clibgit2` binary target, the build-shape surface, and the `GitRepository` actor — open / discover / clone / head / status |
+| `Package.swift` + `Sources/` | `Clibgit2` binary target, the build-shape surface, and the `GitRepository` actor — open / discover / clone / head / status / stage / commit |
 | `Makefile` — `build` / `test` / `lint` + pipeline wrappers | present; all three exit 0 |
-| `Tests/` — 27 tests, 3 suites | pass; build-shape assertions read the linked binary, read-path tests run against local fixtures |
+| `Tests/` — 42 tests, 4 suites | pass; build-shape assertions read the linked binary, read/write-path tests run against local fixtures |
 | `LICENSES.md` | present — **read § LibXDiff is LGPL-2.1** |
 | `.github/workflows/` | `tests.yml` (xcframework from scratch, then `make test`), `lint.yml` |
 
@@ -670,6 +670,101 @@ before extending it:
   because moving the `var` inside the helper removes the capture entirely and
   returns the pointer as an ordinary value.
 
+## The write paths, and why staging does not use `git_index_add_bypath`
+
+```swift
+try await repository.stage(paths: ["scene.fountain"])   // explicit paths only
+let sha = try await repository.commit(
+    message: "Revise the office scene",
+    author: Author(name: "Ada Lovelace", email: "ada@example.com"),
+    committer: Author(name: "Ada Lovelace", email: "ada@example.com")
+)
+```
+
+### Byte fidelity is structural, not configured
+
+Standing Order 7 of the mission: *"No character is transformed. A commit writes
+exactly the bytes the editor saved."* The obvious way to stage a file breaks it.
+
+`git_index_add_bypath` reads the file itself and passes `try_load_filters = true`
+to `git_blob__create_from_paths` (`src/libgit2/index.c:1015`). That runs libgit2's
+content-filter chain, driven by `.gitattributes` and by the `core.autocrlf` and
+`core.eol` configuration keys — and libgit2 reads the user's **global**
+`~/.gitconfig` by default. So on any machine where someone has ever set
+`core.autocrlf` to `true` or `input`, staging through that API silently rewrites
+line endings *inside the committed blob*. The working file is untouched, the commit
+is wrong, nothing reports it, and whether it happens depends on whose laptop ran
+the build.
+
+`stage(paths:)` therefore reads the bytes with `Data` and hands them to
+`git_index_add_from_buffer`, which calls `git_blob_create_from_buffer` directly and
+touches no filter chain at all. The guarantee then holds regardless of what any
+configuration file anywhere says — which is the only kind of guarantee worth making
+about someone's manuscript.
+
+The test suite proves it under **hostile** configuration rather than under
+defaults: a fixture with `core.autocrlf = true`, `core.eol = crlf` and a
+`.gitattributes` of `* text=auto eol=lf`, asserting CRLF bytes survive. Passing
+with default config would only have shown the defaults are harmless.
+`git_index_add_bypath` fails that test.
+
+Byte-fidelity fixtures, all asserted on `Data` and reported as hex on failure:
+
+| Fixture | What would eat it |
+|---|---|
+| UTF-8 BOM | editors that "clean" the file |
+| CRLF line endings | the filter chain, `core.autocrlf` |
+| No trailing newline | `String` round-trips through Foundation |
+| Lone `CR`, `CR CR LF`, `LF CR` | naive line-ending normalisation |
+| Latin-1 / invalid UTF-8 (`0xE9`, `0xFF 0xFE 0x00 0x80`) | any code path that decodes to `String` |
+| Empty file | being committed as absent rather than as an empty blob |
+
+The non-UTF-8 fixture is the one that constrains the implementation most: it
+cannot be expressed as a Swift `String` at all, so any staging path that decoded to
+`String` anywhere would corrupt it with U+FFFD — and no string-based test could
+catch that.
+
+### Two deliberate refusals
+
+- **Symbolic links are refused**, not followed. Staging a link as its target's
+  contents would put a regular file in the repository where the user has a link,
+  and checking it out elsewhere would produce something different from what was
+  committed. That is a silent data error; an explicit `GIT_ENOTSUPPORTED` is not.
+  Writing the link target as the blob is the correct implementation when something
+  needs it.
+- **Directories are refused**, because there is no recursive staging.
+
+### There is no `stageAll`
+
+Absent by design. `git_index_add_all` lets the state of the disk decide what gets
+committed, which for a document editor is wrong twice: it invites committing a file
+the user was still editing, and it makes "what am I about to commit?"
+un-answerable at the call site. Callers name paths; `status()` is how they find the
+candidates.
+
+### Both identities are required, and that is enforced by the compiler
+
+There is exactly one `commit` method and it has no defaults — no
+`author: Author? = nil`, no overload falling back to the git config, not even a
+`committer` defaulting to the author. Verified by probe: calling
+`commit(message:)` alone fails with *"missing arguments for parameters 'author',
+'committer'"*.
+
+libgit2 offers `git_signature_default`, which reads the global config. It is
+deliberately not used: "the machine's identity" is not the same claim as "this
+user's identity", and only the caller knows which one it has. A commit with a
+quietly inherited identity is a commit whose provenance is wrong, and unlike most
+wrong things it is permanent — rewriting it changes every downstream SHA.
+
+If a convenience is ever added it must default the **committer** to the author,
+never the reverse. The author is the claim about who wrote the change; the
+committer is a detail about who recorded it.
+
+`Author` also carries a `TimeZone`, and the offset is written rather than
+normalised to UTC. A commit made at 23:00 in Tokyo is a different fact from one
+made at 14:00 in London at the same instant, and git's format keeps the
+distinction.
+
 ## Tests
 
 27 tests in 3 suites (swift-testing, matching the collection's convention).
@@ -711,6 +806,21 @@ no network anywhere:
 - a staged-then-untouched file is reported on the index side only
 - `depth` is refused by all four `localStrategy` values, with libgit2's verbatim
   message
+
+**Write paths** — see § The write paths for what each fixture defends against:
+
+- CRLF + UTF-8 BOM + no trailing newline round-trips byte-identically, asserted on
+  `Data`
+- bytes that are not valid UTF-8 round-trip
+- CRLF survives with `core.autocrlf = true`, `core.eol = crlf` and a
+  `text=auto` attribute set — the hostile-configuration test
+- lone `CR`, `CR CR LF` and `LF CR` all survive
+- an empty file commits as an empty blob
+- the executable bit is preserved (mode `0o100755`)
+- staging is explicit: naming one path leaves the other untracked
+- staging a directory or a symbolic link is refused
+- `commit` moves HEAD, commits chain, and the tree is clean afterwards
+- author and committer are recorded separately, offsets included
 
 Fixtures are created by calling libgit2 itself — `git_repository_init`,
 `git_index_add_bypath`, `git_commit_create`. Shelling out to `git` is not

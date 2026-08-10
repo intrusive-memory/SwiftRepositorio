@@ -57,7 +57,13 @@ public actor GitRepository {
     private let owned: Handle
 
     /// `git_repository *`, reachable only from actor-isolated code.
-    private var handle: OpaquePointer { owned.raw }
+    ///
+    /// `internal`, not `private`, so the write paths in
+    /// `GitRepository+Write.swift` can reach it — an extension in another file
+    /// cannot see `private`. Still actor-isolated and still never returned to a
+    /// caller, so the guarantee that matters is unchanged: the pointer does not
+    /// leave the actor.
+    var handle: OpaquePointer { owned.raw }
 
     /// Absolute path this repository was opened or cloned to.
     ///
@@ -338,9 +344,14 @@ public actor GitRepository {
     /// `git_oid_tostr_s` returns a pointer into a static per-thread buffer that
     /// the next call overwrites, so the string is copied immediately. This is the
     /// same class of hazard as `git_error_last()`.
-    private static func hex(_ oid: UnsafePointer<git_oid>) -> String {
+    static func hex(_ oid: UnsafePointer<git_oid>) -> String {
         guard let cString = git_oid_tostr_s(oid) else { return "" }
         return String(cString: cString)
+    }
+
+    /// 40-character hex for an OID held by value.
+    static func hexString(_ oid: git_oid) -> String {
+        withUnsafePointer(to: oid) { hex($0) }
     }
 
     private static func path(from delta: UnsafeMutablePointer<git_diff_delta>?) -> String? {
