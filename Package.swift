@@ -98,9 +98,17 @@ let package = Package(
     // Reads the linked binary, never the pinned constants. `swift-testing` ships
     // with the toolchain, so this adds no package dependency — matching the
     // collection's convention.
+    //
+    // `Clibgit2` is a direct dependency so the fixture builder can create test
+    // repositories by calling libgit2 itself. Shelling out to `git` is not an
+    // option: there is no `Process` on iOS, a spawned child would inherit the
+    // sandbox anyway, and Sortie 20 asserts the shipped archive contains no spawn
+    // symbols at all. The write API that would let fixtures be built through
+    // SwiftRepositorio's own surface is Sortie 3's work; until it exists the
+    // fixtures use C directly, and this dependency is what allows that.
     .testTarget(
       name: "SwiftRepositorioTests",
-      dependencies: ["SwiftRepositorio"]
+      dependencies: ["SwiftRepositorio", "Clibgit2"]
     ),
   ]
 )

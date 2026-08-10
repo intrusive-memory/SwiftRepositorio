@@ -42,6 +42,13 @@ custom_rules:
     regex: 'PinnedVersions\.[a-zA-Z]+\s*==\s*PinnedVersions\.'
     message: "Comparing PinnedVersions against itself cannot fail. Assert against libgit2Version / libssh2Version / enabledFeatures, which read the linked binary."
     severity: error
+    # Code only. Without this the rule fires on prose that *discusses* the
+    # antipattern, which is how it first failed: the documentation explaining why
+    # a thing is avoided is not an instance of that thing.
+    excluded_match_kinds:
+      - comment
+      - doccomment
+      - string
 
   # The wrapper's whole reason to exist is that libgit2 handles are not Sendable,
   # its callbacks fire on arbitrary threads, and it has thread-affinity rules.
@@ -52,3 +59,10 @@ custom_rules:
     regex: '@unchecked\s+Sendable'
     message: "libgit2 handles are not Sendable and its thread-affinity rules are real. Put the handle behind an actor instead of asserting safety the C library does not provide."
     severity: error
+    # Code only — see the note on the rule above. GitRepository's own
+    # documentation quotes this annotation to explain why it is not used, and a
+    # rule that cannot tell prose from code punishes the explanation.
+    excluded_match_kinds:
+      - comment
+      - doccomment
+      - string

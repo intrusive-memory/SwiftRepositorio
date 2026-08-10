@@ -22,9 +22,9 @@ decides whether the rest is possible at all.
 | `scripts/verify-no-spawn.sh` — the no-spawn / no-ucontext gate | **PASS, 6 targets, 0 failures**; also self-tested against positive and negative controls |
 | `--fetch-only` pre-gate | passes clean for all three slices, including cold download, checksum rejection and re-extract |
 | `--configure-only` pre-gate | libgit2 + libssh2 configure clean; all three slices verified |
-| `Package.swift` + `Sources/` | `Clibgit2` binary target + the public build-shape surface (`libgit2Version`, `libssh2Version`, `enabledFeatures`) |
+| `Package.swift` + `Sources/` | `Clibgit2` binary target, the build-shape surface, and the `GitRepository` actor — open / discover / clone / head / status |
 | `Makefile` — `build` / `test` / `lint` + pipeline wrappers | present; all three exit 0 |
-| `Tests/` — 12 tests, 2 suites | pass; every assertion reads the linked binary |
+| `Tests/` — 27 tests, 3 suites | pass; build-shape assertions read the linked binary, read-path tests run against local fixtures |
 | `LICENSES.md` | present — **read § LibXDiff is LGPL-2.1** |
 | `.github/workflows/` | `tests.yml` (xcframework from scratch, then `make test`), `lint.yml` |
 
@@ -575,10 +575,107 @@ that errors on `PinnedVersions.x == PinnedVersions.y` for that reason.
 asserted by comparison rather than string matching — `1.10.0 < 1.11.0` is a
 numeric fact, and a lexical compare gets it backwards.
 
+## Shallow clone
+
+`SwiftRepositorio.supportsShallowClone` is **`true`**, with one
+transport-shaped exception, and the exception is the part worth reading.
+
+| Path | What `depth` does |
+|---|---|
+| HTTPS / SSH (smart transport) | negotiated; errors if the server does not advertise the `shallow` capability |
+| any local path or `file://`, **whatever `localStrategy`** | **refused** — `GIT_ENOTSUPPORTED`, `"shallow fetch is not supported by the local transport"` |
+
+### The property that matters more than the flag
+
+**libgit2 never silently ignores `depth`.** Either it negotiates a shallow fetch,
+or it returns an error. There is no configuration in which a depth-limited clone
+quietly downloads the entire history.
+
+That is a better answer than the requirements document feared, and it took an
+experiment to establish — reading the source got it wrong first. The reasoning
+that failed: `git_clone__should_clone_local` routes a plain local path to the
+object-database *copy* path, and `clone_local_into` never reads `depth` (the only
+mention of `depth` in `clone.c` concerns tag downloading). That looked like a
+silent-ignore trap, and it was written up as one. It is not:
+`clone_local_into` still calls `git_remote_fetch` afterwards to set up refs, and
+*that* fetch goes through the local transport, which refuses at
+`src/libgit2/transports/local.c:310`. The test is parameterised over all four
+`localStrategy` values precisely because the inference was wrong once.
+
+### Consequence for the clone size guard
+
+Requirements § Clone worried that `depth` might be missing and that the size
+guard would have to become a pre-flight size check against the host API. Because
+failure is loud, a `depth`-based guard on a **remote** clone cannot silently do
+nothing — it either shallow-clones or errors, and an error is actionable. A
+pre-flight size check is still the better guard, since it can refuse before any
+bytes move, but it is no longer required for correctness.
+
+The one thing not proven here: the smart-transport path is source-verified
+(`smart_protocol.c` handles `wants->depth > 0`, `GIT_PKT_SHALLOW` and
+`GIT_PKT_UNSHALLOW`) and the plumbing from `CloneOptions.depth` into the transport
+is proven by the local transport's refusal arriving at all — but no test clones
+from a live remote, because this suite has no network and must not gain one.
+Closing that gap belongs to a sortie that already has credentials in hand.
+
+## The read paths
+
+```swift
+let repository = try GitRepository.open(at: path)          // or .discover(from:)
+let clone = try GitRepository.clone(from: url, to: path,   // CloneOptions:
+                                    options: .init(checkoutBranch: "main"))
+let head = try await repository.head()                     // branch + 40-char SHA, nil if unborn
+let status = try await repository.status()                 // typed, .gitignore honoured
+```
+
+`GitRepository` is an **actor**, and not because callers want concurrency —
+because libgit2 forbids it. Its `docs/threading.md`: "libgit2 objects cannot be
+safely accessed by multiple threads simultaneously … Most data structures do not
+guard against concurrent access themselves." Only `git_odb` locks internally. The
+`git_repository *` therefore needs an owner that serialises every access, which is
+what the actor is; the handle never leaves it, and every value crossing the
+boundary is a copied Swift value.
+
+### The error-capture discipline, enforced by the compiler
+
+`git_error_last()` is **thread-local**. libgit2 warns about exactly the hazard
+Swift concurrency introduces: "if you use something like GCD on macOS (where code
+is executed on an arbitrary thread), the code must make sure to retrieve the error
+code on the thread where the error happened." An `async` function may resume on a
+different thread than it suspended on, so reading the error after any `await`
+yields an empty message — or another thread's. It fails as a *missing diagnostic*,
+not as a crash, which is why it survives code review.
+
+Every libgit2 call in this package goes through `gitCall` or `gitHandle` in
+`GitError.swift`. Both are **synchronous functions taking non-`async`
+closures**, so there is no syntax for a suspension point between the C call
+returning and `git_error_last()` being read — the compiler will not permit one to
+exist. That is the mechanism: not a convention the next sortie has to remember.
+
+`GitError.message` holds libgit2's text **verbatim** — never prefixed, truncated
+or reworded. When a push is rejected, the remote's own words are the only useful
+information, and Sorties 4, 15 and 16 have exit criteria that depend on it
+surviving. Presentation goes in `description`.
+
+Two Swift 6 concurrency errors shaped this code and are worth knowing about
+before extending it:
+
+- `OpaquePointer` is not `Sendable`, so an actor's nonisolated `deinit` may not
+  read the handle to free it. Rather than assert an exception with `@unchecked
+  Sendable` — which this package's lint rules make an error — the handle lives in
+  a small `final class` whose own `deinit` frees it, involving no isolation
+  boundary at all.
+- A local `var out: OpaquePointer?` captured by a `gitCall` closure inside an actor
+  produces `sending 'reference' risks causing data races`. `gitHandle` exists
+  because moving the `var` inside the helper removes the capture entirely and
+  returns the pointer as an ordinary value.
+
 ## Tests
 
-12 tests in 2 suites (swift-testing, matching the collection's convention).
-They assert; none of them skips. `make test`:
+27 tests in 3 suites (swift-testing, matching the collection's convention).
+They assert; none of them skips.
+
+**Build shape** — reads the linked binary, never the pinned constants:
 
 - HTTPS is present in `enabledFeatures`
 - SSH is present in `enabledFeatures`
@@ -592,6 +689,36 @@ They assert; none of them skips. `make test`:
   itself back on is a change in the shipped binary's shape
 - `Version` parsing and ordering, including the inputs a correct build never
   produces
+
+**Read paths** — against repositories built by libgit2 in a temp directory, with
+no network anywhere:
+
+- a clone of a local fixture has the same HEAD SHA as its source, and a working
+  copy on disk
+- a bare clone has the same HEAD and no working directory
+- `checkoutBranch` selects a non-default branch
+- the transfer-progress callback fires during a real fetch (which needs
+  `.neverLocal` — the default `.auto` copies the object database and never
+  reports transfer progress, so the callback would look broken when it was the
+  strategy that skipped it)
+- `head()` is `nil` rather than an error on a repository with no commits
+- `discover` walks up from a subdirectory, and returns nothing elsewhere
+- opening a non-repository yields `GIT_ENOTFOUND` **with a non-empty message** —
+  the standing check on the thread-local error capture; an empty message here
+  means the discipline broke
+- `status()` with one modified, one untracked and one ignored file returns
+  exactly the modified and the untracked entry
+- a staged-then-untouched file is reported on the index side only
+- `depth` is refused by all four `localStrategy` values, with libgit2's verbatim
+  message
+
+Fixtures are created by calling libgit2 itself — `git_repository_init`,
+`git_index_add_bypath`, `git_commit_create`. Shelling out to `git` is not
+available and never will be: iOS has no `Process`, a spawned child inherits the
+sandbox, and Sortie 20 asserts the shipped archive has no spawn symbols. Commit
+identity and timestamp are fixed so a fixture's SHA is deterministic. When Sortie
+3 lands the public write API, replacing the helper's internals with it is a
+worthwhile simplification.
 
 ## Licences
 
