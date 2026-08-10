@@ -208,6 +208,27 @@ extension GitRepository {
     ///
     /// - Returns: The new commit's 40-character hex SHA.
     public func commit(message: String, author: Author, committer: Author) throws -> String {
+        let tree = try writeStagedTree()
+        defer { git_tree_free(tree) }
+
+        let parent = try currentHeadCommit()
+        defer { if let parent { git_commit_free(parent) } }
+
+        return try author.withSignature { authorSignature in
+            try committer.withSignature { committerSignature in
+                try createCommit(
+                    message: message,
+                    tree: tree,
+                    parent: parent,
+                    author: authorSignature,
+                    committer: committerSignature
+                )
+            }
+        }
+    }
+
+    /// Writes the index out as a tree and looks it up.
+    private func writeStagedTree() throws -> OpaquePointer {
         let repository = handle
 
         let index = try gitHandle("git_repository_index") { out in
@@ -241,43 +262,45 @@ extension GitRepository {
                 message: "the tree just written to the index could not be looked up"
             )
         }
-        defer { git_tree_free(tree) }
+        return tree
+    }
 
-        let parent = try currentHeadCommit()
-        defer { if let parent { git_commit_free(parent) } }
+    /// The `git_commit_create` call itself.
+    private func createCommit(
+        message: String,
+        tree: OpaquePointer,
+        parent: OpaquePointer?,
+        author: UnsafePointer<git_signature>?,
+        committer: UnsafePointer<git_signature>?
+    ) throws -> String {
+        let repository = handle
+        var commitOID = git_oid()
+        var parents: [OpaquePointer?] = parent.map { [$0] } ?? []
 
-        return try author.withSignature { authorSignature in
-            try committer.withSignature { committerSignature in
-                var commitOID = git_oid()
-                var parents: [OpaquePointer?] = parent.map { [$0] } ?? []
-
-                try parents.withUnsafeMutableBufferPointer { buffer in
-                    try gitCall("git_commit_create") {
-                        git_commit_create(
-                            &commitOID,
-                            repository,
-                            // Updating HEAD here is what makes the commit the new
-                            // tip. Passing nil would create a dangling commit that
-                            // nothing references and gc would eventually delete —
-                            // a mistake that looks like a successful commit.
-                            "HEAD",
-                            authorSignature,
-                            committerSignature,
-                            // NULL message encoding means UTF-8, which is what
-                            // Swift `String` already is. Naming an encoding here
-                            // would be asserting something about bytes we do not
-                            // have.
-                            nil,
-                            message,
-                            tree,
-                            buffer.count,
-                            buffer.count == 0 ? nil : buffer.baseAddress
-                        )
-                    }
-                }
-                return Self.hexString(commitOID)
+        try parents.withUnsafeMutableBufferPointer { buffer in
+            try gitCall("git_commit_create") {
+                git_commit_create(
+                    &commitOID,
+                    repository,
+                    // Updating HEAD here is what makes the commit the new tip.
+                    // Passing nil would create a dangling commit that nothing
+                    // references and gc would eventually delete — a mistake that
+                    // looks like a successful commit.
+                    "HEAD",
+                    author,
+                    committer,
+                    // NULL message encoding means UTF-8, which is what Swift
+                    // `String` already is. Naming an encoding here would assert
+                    // something about bytes we do not have.
+                    nil,
+                    message,
+                    tree,
+                    buffer.count,
+                    buffer.count == 0 ? nil : buffer.baseAddress
+                )
             }
         }
+        return Self.hexString(commitOID)
     }
 
     /// The commit HEAD points at, or `nil` when HEAD is unborn.

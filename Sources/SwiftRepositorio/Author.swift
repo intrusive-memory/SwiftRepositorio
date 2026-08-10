@@ -5,7 +5,7 @@ import Clibgit2
 /// Who made a change, and when.
 ///
 /// A value type with no defaults and no empty initialiser. Every commit in this
-/// package must name a real identity, and the way that is enforced is by making
+/// package must name a real identity, and the way that is guaranteed is by making
 /// it impossible to express the alternative — see
 /// ``GitRepository/commit(message:author:committer:)``.
 public struct Author: Sendable, Hashable {

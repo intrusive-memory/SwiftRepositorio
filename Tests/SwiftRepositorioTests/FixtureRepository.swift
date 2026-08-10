@@ -184,6 +184,18 @@ final class FixtureRepository {
         try check(git_index_write(index), "git_index_write")
     }
 
+    /// Registers a remote pointing at a path on disk.
+    ///
+    /// A local bare repository standing in for a server is the whole basis of the
+    /// transport tests: it exercises the real fetch and push code paths — refspec
+    /// handling, the callbacks, ref advancement — with no network, no credentials
+    /// and no TLS.
+    func addRemote(_ name: String, url: String) throws {
+        var remote: OpaquePointer?
+        try check(git_remote_create(&remote, handle, name, url), "git_remote_create(\(name))")
+        git_remote_free(remote)
+    }
+
     /// Creates a branch at the current HEAD commit, without switching to it.
     func createBranch(_ name: String) throws {
         var headOID = git_oid()

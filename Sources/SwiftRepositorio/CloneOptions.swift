@@ -32,6 +32,25 @@ public struct TransferProgress: Sendable, Equatable {
         return received * 0.5 + (Double(indexedDeltas) / Double(totalDeltas)) * 0.5
     }
 
+    /// For callers that have counts but not a full `git_indexer_progress` — push
+    /// reports only current/total/bytes, and inventing the delta figures would be
+    /// worse than reporting zero.
+    init(
+        totalObjects: Int,
+        receivedObjects: Int,
+        localObjects: Int,
+        indexedDeltas: Int,
+        totalDeltas: Int,
+        receivedBytes: Int
+    ) {
+        self.totalObjects = totalObjects
+        self.receivedObjects = receivedObjects
+        self.localObjects = localObjects
+        self.indexedDeltas = indexedDeltas
+        self.totalDeltas = totalDeltas
+        self.receivedBytes = receivedBytes
+    }
+
     init(_ stats: git_indexer_progress) {
         totalObjects = Int(stats.total_objects)
         receivedObjects = Int(stats.received_objects)
@@ -80,7 +99,7 @@ public struct CloneOptions: Sendable {
         case auto
         /// Bypass the transport even for `file://`.
         case alwaysLocal
-        /// Never bypass — force a real fetch even for a plain path.
+        /// Never bypass — always do a real fetch, even for a plain path.
         case neverLocal
         /// Bypass, but copy rather than hardlink.
         case localWithoutLinks

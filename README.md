@@ -22,9 +22,9 @@ decides whether the rest is possible at all.
 | `scripts/verify-no-spawn.sh` — the no-spawn / no-ucontext gate | **PASS, 6 targets, 0 failures**; also self-tested against positive and negative controls |
 | `--fetch-only` pre-gate | passes clean for all three slices, including cold download, checksum rejection and re-extract |
 | `--configure-only` pre-gate | libgit2 + libssh2 configure clean; all three slices verified |
-| `Package.swift` + `Sources/` | `Clibgit2` binary target, the build-shape surface, and the `GitRepository` actor — open / discover / clone / head / status / stage / commit |
+| `Package.swift` + `Sources/` | `Clibgit2` binary target, the build-shape surface, and the `GitRepository` actor — open / discover / clone / head / status / stage / commit / fetch / push / fastForwardPull / aheadBehind |
 | `Makefile` — `build` / `test` / `lint` + pipeline wrappers | present; all three exit 0 |
-| `Tests/` — 42 tests, 4 suites | pass; build-shape assertions read the linked binary, read/write-path tests run against local fixtures |
+| `Tests/` — 71 tests, 7 suites | pass; build-shape assertions read the linked binary, all repository tests run against local fixtures |
 | `LICENSES.md` | present — **read § LibXDiff is LGPL-2.1** |
 | `.github/workflows/` | `tests.yml` (xcframework from scratch, then `make test`), `lint.yml` |
 
@@ -765,6 +765,108 @@ normalised to UTC. A commit made at 23:00 in Tokyo is a different fact from one
 made at 14:00 in London at the same instant, and git's format keeps the
 distinction.
 
+## Remotes: fetch, push, fast-forward pull
+
+```swift
+try await repository.fetch(remote: "origin", options: options)
+try await repository.push(remote: "origin", branch: "main", options: options)
+let outcome = try await repository.fastForwardPull(remote: "origin", options: options)
+let drift = try await repository.aheadBehind(local: "refs/heads/main",
+                                            upstream: "refs/remotes/origin/main")
+```
+
+### No merge, ever — and nothing is half-applied
+
+`fastForwardPull` advances the branch only when it is **strictly behind**.
+Divergence throws `PullError.divergent(local:remote:ahead:behind:)` and changes
+nothing.
+
+That is a product decision. A merge can conflict, and resolving a conflict in a
+screenplay means a human reading two versions of a scene and choosing — there is
+no correct automatic answer, and a half-resolved merge sitting in the working tree
+is worse than a refusal. The refusal is also *safe by construction*: the
+ahead/behind check runs before any write, so the throw happens with the working
+tree untouched. The test asserts that byte for byte, not by eye.
+
+The fast-forward itself checks out with `GIT_CHECKOUT_SAFE`, which refuses rather
+than discards when a local edit would have to be overwritten. The user's unsaved
+work outranks the remote's history.
+
+### There is no force flag
+
+No public API takes one. Nothing internal writes the `+` refspec prefix that means
+"overwrite whatever is there", and `GIT_CHECKOUT_FORCE` appears nowhere — every
+checkout is `SAFE`. `grep -ri "force" Sources/` returns only the comment block
+explaining this.
+
+A force push discards commits that exist only on the remote: someone else's work,
+usually, and unrecoverable from the client's side. That should not be reachable by
+passing `true` from a document editor.
+
+### Credentials never touch the disk
+
+`Credential` has no case that names a file. libgit2's `git_credential_ssh_key_new`
+takes key *paths* and reads them itself, and it is deliberately unreachable from
+this layer:
+
+- a sandboxed macOS app cannot read `~/.ssh` at all, so a path-based credential
+  works in development, breaks after sandboxing, and breaks looking like an
+  authentication problem rather than a file-access one;
+- private key material belongs in the Keychain, and the point of keeping it there
+  is that it is never a file the app can be induced to read.
+
+So the SSH case carries key **text** and goes through
+`git_credential_ssh_key_memory_new`. That constructor exists only when libgit2 was
+built with `GIT_SSH_LIBSSH2_MEMORY_CREDENTIALS`, which needs a libssh2 exporting
+`libssh2_userauth_publickey_frommemory` — both are asserted by
+`scripts/verify-no-spawn.sh` (checks C and D), and a test constructs one at runtime
+to confirm.
+
+`CredentialProvider` is not `async` and cannot be: libgit2 calls it synchronously
+from the transport thread with no way to suspend. A provider that needs to ask a
+human must have asked already. It also takes an `attempt` count, because libgit2's
+own documentation warns that it will keep asking — "it's easy to get in a loop if
+you fail to stop providing the same incorrect credentials". `SingleCredentialProvider`
+offers once and then returns `nil`, turning a rejected token into one clean
+failure instead of a spin.
+
+### Host verification fails closed
+
+`RemoteOptions.hostVerifier` defaults to `FailClosedHostVerifier`, which **rejects
+every host**. That is deliberately inconvenient and it is the only safe default.
+
+The tempting alternative — return `.deferToLibgit2` and let libgit2 decide — is a
+trap for SSH: libgit2 has no host-key database, so there is no opinion to defer to
+and deferring accepts *any* key from *anyone*. The client would then offer the
+user's private key to whoever answered. `PinnedFingerprintVerifier` is provided for
+callers who have published SHA-256 fingerprints (GitHub's are), and it refuses
+anything not on its list, including hosts it has no entry for and empty pin sets.
+
+This protocol is the seam Sortie 12 plugs into, and it is also where the
+`OPENSSLDIR` gap from § The trust store problem gets closed: because
+`USE_HTTPS=OpenSSL` looks for a trust store that does not exist in a sandbox,
+`libgit2ConsidersValid` arrives `false` for perfectly good certificates and the
+real chain validation has to happen in a verifier, against Security.framework.
+Until then, `.deferToLibgit2` is not a safe answer for TLS either.
+
+### Cancellation is a distinct outcome
+
+`RemoteOptions.isCancelled` defaults to `Task.isCancelled` and is bridged to the
+callbacks' return codes. A cancelled operation throws
+`RemoteOperationError.cancelled`, never a `GitError` — libgit2 reports an aborted
+callback as `GIT_EUSER` with no message, which on its own is indistinguishable from
+a bug, and a cancelled fetch must never be shown to a user as a failure.
+
+It is a closure rather than a direct read so tests can inject a deterministic
+canceller: cancelling a real `Task` mid-fetch is a race, and a test that depends on
+winning it fails on a fast machine.
+
+`RemoteCallbackContext` also carries a `refusal`, because libgit2 collapses every
+non-zero callback return into `GIT_EUSER` and discards what the callback knew.
+Without somewhere to put it, "the host fingerprint did not match" arrives as
+"error -7" — the same information loss the thread-local error rule exists to
+prevent, coming from the other direction.
+
 ## Tests
 
 27 tests in 3 suites (swift-testing, matching the collection's convention).
@@ -821,6 +923,33 @@ no network anywhere:
 - staging a directory or a symbolic link is refused
 - `commit` moves HEAD, commits chain, and the tree is clean afterwards
 - author and committer are recorded separately, offsets included
+
+**Remotes** — against a local **bare** repository standing in for a server:
+
+- push advances the *server's* ref, read back out of the bare repo rather than
+  trusted from the client
+- fetch updates the tracking ref and moves neither the local branch nor the
+  working tree
+- `aheadBehind` counts both directions, including the divergent case
+- `fastForwardPull` fast-forwards when strictly behind, checks the file out, and
+  leaves a clean tree
+- divergence throws `.divergent` with the working tree **byte-identical**
+  afterwards, and the remote's file never appearing on disk
+- ahead-only and unborn-HEAD cases throw their own typed errors
+- a cancelled fetch and a cancelled push both throw `.cancelled`, and the
+  cancelled push leaves the server's ref where it was
+- cancelling from inside a progress callback aborts the transfer
+- `FailClosedHostVerifier` rejects every certificate kind, rejects even when
+  libgit2 reports the certificate valid, and never returns `.deferToLibgit2`
+- `PinnedFingerprintVerifier` trusts a matching digest and rejects mismatches,
+  unknown hosts, missing digests, wrong certificate kinds and empty pin sets
+- every `Credential` case builds a real libgit2 credential, which is the runtime
+  proof that the memory-based SSH constructor is in this build
+
+The helpers that move the server forward (`FixtureClone`, `RefReader`) are an
+independent libgit2 implementation on purpose. If the thing that advanced the
+server were the same actor whose fetch and pull are under test, a bug breaking both
+would cancel out and the suite would stay green.
 
 Fixtures are created by calling libgit2 itself — `git_repository_init`,
 `git_index_add_bypath`, `git_commit_create`. Shelling out to `git` is not

@@ -175,7 +175,7 @@ func gitHandle(
     guard let out else {
         // A zero return with a NULL out-parameter is a libgit2 contract violation,
         // not something a caller can handle. Reporting it as an error beats
-        // force-unwrapping into a crash a user would see as a hang.
+        // an unchecked unwrap into a crash a user would see as a hang.
         throw GitError(
             operation: operation,
             code: GIT_ERROR.rawValue,
