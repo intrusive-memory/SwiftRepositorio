@@ -1,0 +1,27 @@
+## Build artefacts
+.build/
+.swiftpm/
+DerivedData/
+*.xcuserstate
+
+## Package.resolved is not tracked in this collection (SwiftRepositorio has no
+## package dependencies today, but the convention holds).
+Package.resolved
+
+## xcframework build pipeline
+##
+## .cache/  — pinned upstream sources (git clones at exact commits, the OpenSSL
+##            release tarball). Reproducible from scripts/versions.sh; never
+##            committed.
+## build/   — per-slice cmake/ninja trees and install prefixes. Intermediate.
+## artifacts/ — the finished Clibgit2.xcframework, ~40 MB of static archive.
+##            Not committed: a binary blob in git is exactly the architecture
+##            this package exists to avoid. It is produced by
+##            scripts/build-xcframework.sh and, for downstream consumers, is to
+##            be published as a release asset and referenced by url + checksum.
+.cache/
+build/
+artifacts/
+
+## macOS
+.DS_Store

@@ -1,0 +1,11 @@
+// Copied verbatim into every slice of Clibgit2.xcframework by
+// scripts/build-xcframework.sh.
+//
+// An explicit `header` entry, not `umbrella header`: an umbrella module warns
+// once per public header that the umbrella does not transitively include, and
+// libgit2 ships ~30 headers under git2/sys/ that git2.h deliberately does not
+// include. Explicit is quieter and says what we mean.
+module Clibgit2 {
+    header "Clibgit2.h"
+    export *
+}
