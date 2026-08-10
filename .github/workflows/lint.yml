@@ -1,0 +1,80 @@
+name: Lint
+
+# Separate from tests.yml on purpose. Linting takes seconds; building the
+# xcframework takes twenty minutes. Folding the two together would mean a style
+# error is only discovered after a full C build, and a lint fix would re-pay that
+# cost to re-verify.
+#
+# It also needs no xcframework at all — SwiftLint reads source, so this job is
+# green or red long before any C is compiled.
+on:
+  pull_request:
+    branches: [main, development]
+  push:
+    branches: [main, development]
+  workflow_dispatch:
+
+concurrency:
+  group: lint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  swiftlint:
+    name: SwiftLint
+    runs-on: macos-26
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      # `make lint` fails loudly when swiftlint is absent rather than skipping — a
+      # linter that is not installed must not read as a clean tree. This step makes
+      # sure that failure never happens for an avoidable reason, and printing the
+      # version means a rule that starts or stops firing can be attributed to a
+      # SwiftLint upgrade rather than to the source.
+      - name: Ensure SwiftLint is installed
+        run: |
+          if ! command -v swiftlint >/dev/null 2>&1; then
+            brew install swiftlint
+          fi
+          swiftlint version
+
+      # `make lint`, not `swiftlint` spelled out here, so a developer's local run
+      # and this gate cannot drift apart. Change the rules or the flags in the
+      # Makefile and both move together.
+      - name: Lint
+        run: make lint
+
+      # The standing assertion that `lint` is read-only. A gate must not rewrite
+      # the tree it is judging: pointed at a formatter it would reformat the
+      # checkout and then pass on whatever it had just written. The sibling package
+      # SwiftEscribo made exactly that mistake once (its DL-4), which is why this
+      # step exists here from the start rather than after the same lesson.
+      - name: Fail if linting modified the checkout
+        run: |
+          if ! git diff --exit-code; then
+            echo "::error::The lint step modified tracked files. A lint gate must be read-only — see the Makefile's lint/format split."
+            exit 1
+          fi
+          if [ -n "$(git status --porcelain)" ]; then
+            git status --porcelain
+            echo "::error::The lint step left untracked files in the checkout."
+            exit 1
+          fi
+
+      # Standing Order 1, as an executable check rather than a convention someone
+      # has to remember. Everything runs through a make target using xcodebuild.
+      #
+      # The search term is assembled from a variable instead of being written out,
+      # because a check that spelled the forbidden strings literally would match
+      # ITSELF and fail every run — the grep covers `.github/`, which includes this
+      # file. Caught locally; worth the two lines of indirection.
+      - name: Assert no naked SwiftPM build or test invocations
+        run: |
+          W=swift
+          if grep -rn "$W build\|$W test" Makefile .github/ ; then
+            echo "::error::Standing Order 1: every build and test goes through a make target using xcodebuild. The lines above invoke SwiftPM directly."
+            exit 1
+          fi
+          echo "OK: no direct SwiftPM build/test invocation in Makefile or .github/"

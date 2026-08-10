@@ -1,0 +1,54 @@
+# SwiftLint configuration for SwiftRepositorio.
+#
+# This package is mostly a C build pipeline with a thin Swift face on it, so the
+# style rules matter less here than the two structural rules at the bottom, which
+# encode things this package can get catastrophically wrong.
+
+excluded:
+  - .build
+  - .cache        # pinned upstream sources — not ours to lint
+  - build         # per-slice CMake trees
+  - artifacts
+  - DerivedData
+  - .swiftpm
+
+# Style rules that would fire on documentation-heavy source without saying
+# anything useful about correctness.
+disabled_rules:
+  - identifier_name
+  - line_length
+  - todo
+  - trailing_comma
+  - type_body_length
+  - file_length
+
+opt_in_rules:
+  - unavailable_function
+
+custom_rules:
+  # The single most dangerous mistake available in this package: asserting the
+  # shape of the build against the constants the build script was *told*, rather
+  # than against what the linked binary reports. It reads as a passing test and
+  # proves nothing. libssh2 already demonstrated why — its git tag reports
+  # 1.11.1_DEV while its release tarball reports 1.11.1, and only the library
+  # itself can say which one is in the binary.
+  #
+  # PinnedVersions may appear in tests, but only ever as the *expected* side of a
+  # comparison whose actual side came from the library. That distinction is not
+  # expressible as a regex, so this rule is a warning that asks for a second look
+  # rather than an error.
+  pinned_versions_are_not_evidence:
+    name: "PinnedVersions is a declaration, not a measurement"
+    regex: 'PinnedVersions\.[a-zA-Z]+\s*==\s*PinnedVersions\.'
+    message: "Comparing PinnedVersions against itself cannot fail. Assert against libgit2Version / libssh2Version / enabledFeatures, which read the linked binary."
+    severity: error
+
+  # The wrapper's whole reason to exist is that libgit2 handles are not Sendable,
+  # its callbacks fire on arbitrary threads, and it has thread-affinity rules.
+  # `@unchecked Sendable` is how that gets papered over at 2am, and the resulting
+  # data race in an object database is a corrupted repository, not a crash.
+  no_unchecked_sendable:
+    name: "No @unchecked Sendable over libgit2 handles"
+    regex: '@unchecked\s+Sendable'
+    message: "libgit2 handles are not Sendable and its thread-affinity rules are real. Put the handle behind an actor instead of asserting safety the C library does not provide."
+    severity: error

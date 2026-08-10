@@ -22,8 +22,11 @@ decides whether the rest is possible at all.
 | `scripts/verify-no-spawn.sh` — the no-spawn / no-ucontext gate | **PASS, 6 targets, 0 failures**; also self-tested against positive and negative controls |
 | `--fetch-only` pre-gate | passes clean for all three slices, including cold download, checksum rejection and re-extract |
 | `--configure-only` pre-gate | libgit2 + libssh2 configure clean; all three slices verified |
-| `Package.swift` + `Sources/` | skeleton: `Clibgit2` binary target, version constants, a runtime linkage reader |
-| `Makefile`, `LICENSES.md`, tests | not yet written (Sortie 1b) |
+| `Package.swift` + `Sources/` | `Clibgit2` binary target + the public build-shape surface (`libgit2Version`, `libssh2Version`, `enabledFeatures`) |
+| `Makefile` — `build` / `test` / `lint` + pipeline wrappers | present; all three exit 0 |
+| `Tests/` — 12 tests, 2 suites | pass; every assertion reads the linked binary |
+| `LICENSES.md` | present — **read § LibXDiff is LGPL-2.1** |
+| `.github/workflows/` | `tests.yml` (xcframework from scratch, then `make test`), `lint.yml` |
 
 `swift build` fails until the xcframework exists. That is correct behaviour, not
 a bug: run `scripts/build-xcframework.sh` first. There is no committed binary and
@@ -50,12 +53,24 @@ The script preflights all of these and names the one that is missing. Homebrew's
 `cmake` / `ninja` / `pkg-config` **executables** are expected and fine; what the
 build refuses is Homebrew *libraries and headers* — see § Hermeticity.
 
+Everything runs through `make` (Standing Order 1) — CI calls the same targets:
+
 ```sh
-scripts/build-xcframework.sh --fetch-only      # seconds: stages 1-2, no compiler
-scripts/build-xcframework.sh --configure-only  # + both CMake configures
-scripts/build-xcframework.sh                   # ~15-25 min cold, three slices
-scripts/verify-no-spawn.sh                     # the gate; also runs at the end
+make fetch-only        # seconds: fetch + checksum + extract, no compiler
+make configure-only    # + both CMake configures, stopping before ninja
+make xcframework       # ~20-25 min cold, all three slices, ends with the gate
+make verify-no-spawn   # the symbol gate on its own
+
+make build             # macOS arm64
+make build-ios         # proves the iOS device slice links
+make test              # 12 tests, 2 suites
+make lint              # SwiftLint, read-only
+make help              # every target
 ```
+
+`make build`, `test` and `lint` all need `artifacts/Clibgit2.xcframework`; a
+fresh checkout has none, and the Makefile says so with instructions rather than
+letting SwiftPM emit a wall of text about a missing artifact.
 
 Useful knobs: `SLICES="macos-arm64"` to build one slice, `--keep-build` to keep
 the CMake trees so `nm` has something to look at, `JOBS=N`, `SIGN_IDENTITY=...`.
@@ -534,9 +549,54 @@ It has been exercised against a purpose-built archive containing `fork`,
 `git_process_start` (correctly refused). Check D is skipped when `build/` has
 been cleaned; the same assertions run inline during the build.
 
+## The Swift surface
+
+Small on purpose — the API for repositories, clones and commits belongs to later
+sorties. What exists is the answer to "what actually got linked":
+
+```swift
+SwiftRepositorio.libgit2Version        // Version, from git_libgit2_version()
+SwiftRepositorio.libssh2Version        // Version?, from libssh2_version()
+SwiftRepositorio.enabledFeatures       // Features, git_libgit2_features() decoded
+SwiftRepositorio.minimumLibssh2Version // the 1.11.0 floor, and why
+SwiftRepositorio.buildDescription      // one line naming everything linked
+SwiftRepositorio.PinnedVersions        // what the build script was TOLD
+```
+
+The split between the first four and `PinnedVersions` is the whole design. The
+first four read the binary; `PinnedVersions` records the recipe. A test that
+compares the recipe against itself cannot fail for the reason that matters, and
+this package has already produced the failure that proves it: libssh2's git tag
+reports `1.11.1_DEV` while its release tarball reports `1.11.1`, and only the
+library can say which one is in the binary. `.swiftlint.yml` has a custom rule
+that errors on `PinnedVersions.x == PinnedVersions.y` for that reason.
+
+`Version` is `Comparable` and ignores packaging suffixes, so the libssh2 floor is
+asserted by comparison rather than string matching — `1.10.0 < 1.11.0` is a
+numeric fact, and a lexical compare gets it backwards.
+
+## Tests
+
+12 tests in 2 suites (swift-testing, matching the collection's convention).
+They assert; none of them skips. `make test`:
+
+- HTTPS is present in `enabledFeatures`
+- SSH is present in `enabledFeatures`
+- the **linked** libssh2 is ≥ 1.11.0, read from `libssh2_version()` at runtime
+- the linked libssh2 is a *release* build — no `_DEV` suffix, which is the
+  tag-versus-tarball trap and is invisible to the floor test above, since
+  `1.11.1_DEV` satisfies the floor perfectly well
+- the linked libgit2 matches the pinned 1.9.6
+- threads, regex and an HTTP parser are present
+- NTLM and Negotiate are **absent**, as configured — a backend that switched
+  itself back on is a change in the shipped binary's shape
+- `Version` parsing and ordering, including the inputs a correct build never
+  produces
+
 ## Licences
 
-Full text inventory is `LICENSES.md` (Sortie 1b). The situation in brief:
+Full inventory in `LICENSES.md`, each entry verified against the source file that
+states it. The situation in brief:
 
 - **libgit2 — GPLv2 with a linking exception.** The exception is what permits
   static linking into a closed-source App Store binary, and it is the reason any
@@ -548,6 +608,15 @@ Full text inventory is `LICENSES.md` (Sortie 1b). The situation in brief:
 - **OpenSSL 3.x — Apache-2.0.** Attribution, no copyleft. Also the only
   component here on Apple's third-party-SDK list.
 - **libssh2 — BSD-3-Clause.** Attribution.
+- **PCRE2** (BSD-3-Clause with a binary-redistribution exemption), **llhttp**
+  (MIT) and **SHA-1DC** (MIT) are bundled inside libgit2 and are compiled into
+  this archive.
+- **⚠️ LibXDiff is LGPL-2.1-or-later**, is mandatory in libgit2 1.9.6, and is
+  **not** covered by libgit2's linking exception — that exception is a grant from
+  the libgit2 authors, and Libenzi is not one of them. Static LGPL linking into an
+  App Store binary is the awkward case under LGPL-2.1 §6. Every libgit2 consumer
+  is in the same position, so this is well-trodden rather than novel, but it is a
+  decision above this package's level and `LICENSES.md` lays out the options.
 - Not shipped and deliberately so: **wolfSSL**, the only other ed25519-capable
   libssh2 backend, is GPL with no linking exception — non-viable for a closed
   App Store binary.

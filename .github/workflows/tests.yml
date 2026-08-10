@@ -1,0 +1,116 @@
+name: Tests
+
+# Builds Clibgit2.xcframework from pinned source on a clean runner, then runs the
+# suite against it. This is the plan's "the whole thing runs from `make` targets,
+# on a clean checkout, on CI" criterion, and building from scratch is the point:
+# `artifacts/` is gitignored, so a checkout has no binary and CI cannot
+# accidentally validate a stale artefact that only exists on one laptop.
+#
+# It costs ~20-25 minutes. That is deliberate and was budgeted. The alternative —
+# committing a 40 MB binary or caching it — either puts a blob in git or lets a
+# stale one pass the gate, and this package exists to own that artefact honestly.
+#
+# The pre-gates run first and cost seconds. `fetch-only` catches a moved tag, a
+# bad checksum or a missing SDK stub; `configure-only` catches every backend
+# assertion (host-prefix contamination, the pkg-config bypass, all of
+# git2_features.h). Neither can pass while the long build would fail for those
+# reasons, so putting them first turns a 22-minute red into a 2-minute red.
+on:
+  pull_request:
+    branches: [main, development]
+  push:
+    branches: [main, development]
+  workflow_dispatch:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-macos:
+    name: Build xcframework and test on macOS
+    # macos-26 or later, never macos-15 or earlier: the package's deployment floor
+    # is macOS 26 / iOS 26 (Package.swift `platforms:`), and an older image has no
+    # SDK that can build it.
+    runs-on: macos-26
+
+    # A hung job burns the six-hour Actions default and never reports, which is
+    # strictly worse than a failure — a red gate is information, a wedged gate is
+    # not. The measured local cold build is ~20-25 min across three slices; 60 is
+    # generous without being useless.
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Show toolchain versions
+        run: |
+          swift --version
+          xcodebuild -version
+          cmake --version | head -1 || echo "cmake not yet installed"
+
+      # cmake and ninja are hard requirements of the build script — libgit2 and
+      # libssh2 are both CMake projects and the script configures with -G Ninja.
+      # swiftlint is not needed by this workflow (lint.yml owns that).
+      - name: Install build dependencies
+        run: |
+          brew install cmake ninja
+          cmake --version | head -1
+          ninja --version
+
+      # Pre-gate 1, seconds. Fetches libgit2 at its pinned commit and the libssh2
+      # and OpenSSL release tarballs at their pinned checksums. A checksum
+      # mismatch here is a supply-chain event and fails the build outright rather
+      # than being retried through.
+      - name: Pre-gate — fetch and verify pinned sources
+        run: make fetch-only
+
+      # Pre-gate 2, ~1-2 min. This is where the backend decisions are actually
+      # asserted, at configure time, instead of after a twenty-minute compile.
+      #
+      # It reports "skipped (no prefix)" for slices whose OpenSSL/libssh2 are not
+      # built yet — which on a clean runner is all of them — so it is a syntax and
+      # path check here rather than a full backend check. The same assertions run
+      # inline during the real build below, where they have prefixes to check
+      # against.
+      - name: Pre-gate — configure
+        run: make configure-only
+
+      # The long one. All three slices from pinned source: OpenSSL (no-async),
+      # libssh2 over OpenSSL, libgit2 with USE_SSH=libssh2 / USE_HTTPS=OpenSSL.
+      # Ends by running the symbol gate itself, so a build that produced a
+      # spawn-capable or ITMS-90338-tripping archive fails here.
+      - name: Build Clibgit2.xcframework (all three slices)
+        run: make xcframework
+
+      # Belt and braces: the script already ran this, but running it as its own
+      # step means the log shows the gate's verdict as a separate, attributable
+      # success rather than buried in 20 minutes of compiler output.
+      - name: Symbol gate — no spawn, no ucontext
+        run: make verify-no-spawn
+
+      - name: Build
+        run: make build
+
+      - name: Test
+        run: make test
+
+      # The iOS slices are built and merged into the xcframework, so proving they
+      # link is nearly free. Escribir links the macOS slice only (D-8), which is
+      # why this is a separate step: it must be able to fail without anyone
+      # mistaking it for the macOS path being broken.
+      - name: Build for the iOS device slice
+        run: make build-ios
+
+      # A build this long is worth being able to post-mortem without re-running.
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            build/**/*.log
+            build/**/CMakeCache.txt
+          retention-days: 7
+          if-no-files-found: ignore

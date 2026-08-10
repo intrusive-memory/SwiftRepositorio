@@ -49,10 +49,18 @@ let package = Package(
     // honest behaviour — a stale committed binary would be worse. The artefact
     // is ~40 MB of static archive and is gitignored for that reason.
     //
-    // KNOWN FOLLOW-UP (not this sortie's): consuming this package from another
-    // repository over SPM requires the remote form, because a git clone will not
-    // contain artifacts/. That means publishing the zipped xcframework as a
-    // release asset and swapping the declaration below for:
+    // TODO: flip to the release-asset form once a release exists.
+    //
+    // Consuming this package from another repository over SPM REQUIRES the remote
+    // form: a git clone does not contain artifacts/, so Escribir cannot depend on
+    // SwiftRepositorio by URL until the xcframework is published. Until then the
+    // only workable arrangement is a local sibling checkout with the xcframework
+    // built in place (`make xcframework`).
+    //
+    // Cutting that release is a supervisor step, not a code change here. When it
+    // happens: zip the xcframework, attach it to the release, take the checksum
+    // with `swift package compute-checksum Clibgit2.xcframework.zip`, and swap the
+    // declaration below for:
     //
     //     .binaryTarget(
     //       name: "Clibgit2",
@@ -87,7 +95,12 @@ let package = Package(
       ]
     ),
 
-    // Tests are Sortie 1b's work: the features/version surface and the runtime
-    // assertion that the LINKED libssh2 reports >= 1.11.0.
+    // Reads the linked binary, never the pinned constants. `swift-testing` ships
+    // with the toolchain, so this adds no package dependency — matching the
+    // collection's convention.
+    .testTarget(
+      name: "SwiftRepositorioTests",
+      dependencies: ["SwiftRepositorio"]
+    ),
   ]
 )
