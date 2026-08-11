@@ -1,3 +1,5 @@
+import Foundation
+
 import Clibgit2
 
 /// A git repository.
@@ -114,6 +116,74 @@ public actor GitRepository {
         }
         guard code == 0, let found = buffer.ptr else { return nil }
         return try open(at: String(cString: found))
+    }
+
+    // MARK: - Creating
+
+    /// Creates a new, empty repository at `path`.
+    ///
+    /// Added for callers (Escribir's `CloneOrchestrator` tests, first) that need a
+    /// real, hermetic local repository to stage/commit content into and clone
+    /// *from* — without shelling out to `git init` (this package has no `Process`
+    /// anywhere, on any platform) and without depending on a fixture checked into
+    /// some other project's tree. `Tests/SwiftRepositorioTests/FixtureRepository.swift`
+    /// hand-rolled exactly this with raw `git_repository_init_ext` calls before this
+    /// method existed; this is that logic, promoted to public API and reused by
+    /// `WritePathTests`'s own fixture builder (see that file).
+    ///
+    /// - Parameters:
+    ///   - path: Destination directory. Created (including any missing parent
+    ///     directories) before `git_repository_init_ext` runs — libgit2's own
+    ///     directory creation is not documented to create intermediate parents, and
+    ///     a caller building a fixture under a fresh temporary directory should not
+    ///     have to `mkdir -p` it first.
+    ///   - bare: `true` for a bare repository (no working directory) — the shape a
+    ///     local "remote" fixture needs (`FixtureRepository.addRemote` and
+    ///     `GitRepositoryTests`/`RemoteTests` both point at one). `false` (the
+    ///     default) creates an ordinary working-directory repository.
+    ///   - initialBranch: The branch name HEAD points at before the first commit.
+    ///     Defaults to `"main"` rather than falling through to `init.defaultBranch`
+    ///     in whatever `~/.gitconfig` the calling machine happens to have — a
+    ///     fixture whose branch name depends on the developer's global config is a
+    ///     fixture that behaves differently on CI than it does locally, which is
+    ///     exactly what `FixtureRepository.init` already pins for the same reason.
+    public static func create(
+        at path: String,
+        bare: Bool = false,
+        initialBranch: String = "main"
+    ) throws -> GitRepository {
+        Libgit2Runtime.ensureInitialized()
+
+        try FileManager.default.createDirectory(
+            atPath: path, withIntermediateDirectories: true)
+
+        var options = git_repository_init_options()
+        try gitCall("git_repository_init_options_init") {
+            git_repository_init_options_init(&options, UInt32(GIT_REPOSITORY_INIT_OPTIONS_VERSION))
+        }
+        if bare {
+            options.flags |= GIT_REPOSITORY_INIT_BARE.rawValue
+        }
+
+        // `initial_head` is a `const char *` libgit2 reads during the call —
+        // `withCString` keeps the buffer alive for exactly that long, the same
+        // discipline `clone(from:to:options:)` uses for `checkout_branch` below.
+        let handle = try initialBranch.withCString { cBranch -> OpaquePointer? in
+            options.initial_head = cBranch
+            return try gitHandle("git_repository_init_ext") { out in
+                git_repository_init_ext(&out, path, &options)
+            }
+        }
+
+        guard let handle else {
+            throw GitError(
+                operation: "git_repository_init_ext",
+                code: GIT_ERROR.rawValue,
+                klass: -1,
+                message: "libgit2 reported success but produced no repository handle"
+            )
+        }
+        return GitRepository(handle: handle, path: path)
     }
 
     // MARK: - Cloning

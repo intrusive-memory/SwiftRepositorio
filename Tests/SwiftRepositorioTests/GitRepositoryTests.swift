@@ -70,6 +70,100 @@ struct GitRepositoryTests {
         #expect(try GitRepository.discover(from: elsewhere.path) == nil)
     }
 
+    // MARK: - Create
+
+    /// A freshly created repository has an unborn HEAD, exactly like a fresh
+    /// `git_repository_init` — the same state `FixtureRepository(name:)`'s
+    /// hand-rolled `git_repository_init_ext` call produced before `create(at:bare:initialBranch:)`
+    /// existed to replace it for callers outside this package.
+    @Test("create produces an empty repository with an unborn HEAD")
+    func createProducesAnEmptyRepositoryWithUnbornHead() async throws {
+        let path = Self.temporaryPath("created")
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        let repository = try GitRepository.create(at: path)
+
+        #expect(try await repository.head() == nil)
+        #expect(try await repository.isHeadUnborn())
+        #expect(await repository.isBare == false)
+        #expect(await repository.workingDirectory != nil)
+        #expect(FileManager.default.fileExists(atPath: path))
+    }
+
+    /// `create(at:)` makes the destination directory itself, including missing
+    /// parent directories — a caller building a fixture under a fresh temporary
+    /// directory should not have to `mkdir -p` it first.
+    @Test("create makes missing parent directories")
+    func createMakesMissingParentDirectories() throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("SwiftRepositorioTests-\(UUID().uuidString)")
+        let path = root.appendingPathComponent("nested/two/levels/deep").path
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        _ = try GitRepository.create(at: path)
+        #expect(FileManager.default.fileExists(atPath: path))
+    }
+
+    @Test("a bare create has no working directory")
+    func bareCreateHasNoWorkingDirectory() async throws {
+        let path = Self.temporaryPath("created-bare")
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        let repository = try GitRepository.create(at: path, bare: true)
+        #expect(await repository.isBare)
+        #expect(await repository.workingDirectory == nil)
+    }
+
+    /// `initialBranch` cannot be observed before the first commit — `head()`
+    /// reports `nil` for an unborn HEAD by design (see ``headIsNilWhenUnborn()``
+    /// above) rather than revealing the branch a first commit would land on. So
+    /// this proves the parameter the only way it is observable: commit through the
+    /// created repository's own write API (Sortie 3) and read HEAD back.
+    @Test("create's initialBranch names the branch the first commit lands on")
+    func createInitialBranchNamesTheFirstCommit() async throws {
+        let path = Self.temporaryPath("created-trunk")
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        let repository = try GitRepository.create(at: path, initialBranch: "trunk")
+        let workdir = try #require(await repository.workingDirectory)
+        try "hello\n".write(
+            toFile: workdir + "/greeting.txt", atomically: true, encoding: .utf8)
+        try await repository.stage(paths: ["greeting.txt"])
+        let author = Author(name: "SwiftRepositorio Tests", email: "tests@example.invalid")
+        let sha = try await repository.commit(message: "Initial commit", author: author, committer: author)
+
+        let head = try #require(try await repository.head())
+        #expect(head.branch == "trunk")
+        #expect(head.referenceName == "refs/heads/trunk")
+        #expect(head.sha == sha)
+    }
+
+    /// The end-to-end fixture-building round trip this method exists for:
+    /// create → write a real file → stage → commit → open a clone from it. Every
+    /// step goes through this package's own public API, with no `Process`, no
+    /// committed fixture bytes, and no dependency on a `git` binary being present.
+    @Test("a created-then-committed repository clones like any other")
+    func createdRepositoryCanBeClonedFrom() async throws {
+        let sourcePath = Self.temporaryPath("created-source")
+        defer { try? FileManager.default.removeItem(atPath: sourcePath) }
+
+        let source = try GitRepository.create(at: sourcePath)
+        let workdir = try #require(await source.workingDirectory)
+        try "# Fixture\n".write(toFile: workdir + "/README.md", atomically: true, encoding: .utf8)
+        try await source.stage(paths: ["README.md"])
+        let author = Author(name: "SwiftRepositorio Tests", email: "tests@example.invalid")
+        let sourceSHA = try await source.commit(
+            message: "Initial commit", author: author, committer: author)
+
+        let destinationPath = Self.temporaryPath("created-clone")
+        defer { try? FileManager.default.removeItem(atPath: destinationPath) }
+
+        let clone = try GitRepository.clone(from: sourcePath, to: destinationPath)
+        let head = try #require(try await clone.head())
+        #expect(head.sha == sourceSHA)
+        #expect(head.branch == "main")
+    }
+
     // MARK: - Head
 
     @Test("head returns the branch and the SHA of the commit")
