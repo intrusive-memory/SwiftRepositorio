@@ -74,7 +74,9 @@ let package = Package(
     // TAG carries the url+checksum form (see v0.1.0) — flip at release time only.
     .binaryTarget(
       name: "Clibgit2",
-      path: "artifacts/Clibgit2.xcframework"
+      url:
+        "https://github.com/intrusive-memory/SwiftRepositorio/releases/download/v0.1.0/Clibgit2.xcframework.zip",
+      checksum: "a024b99d44d1e51a770ebe47a9340b36dc9b118feffc8416c3fada56d1ab3042"
     ),
 
     .target(
