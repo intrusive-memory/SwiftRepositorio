@@ -2,7 +2,7 @@
 type: doc
 package: SwiftRepositorio
 state: current
-updated: 2026-08-10
+updated: 2026-08-11
 ---
 
 # SwiftRepositorio
@@ -10,9 +10,13 @@ updated: 2026-08-10
 A Swift face over libgit2, and the one place that owns the libgit2 + libssh2 +
 OpenSSL xcframework and its CVE duty.
 
-The Swift API is not written yet. What exists today is the binary target and the
-build pipeline that produces it — the part nobody else ships, and the part that
-decides whether the rest is possible at all.
+As of v0.2.1 the Swift API is written: repository open/discover/create/clone, status,
+staged writes, remotes (fetch/push/fast-forward pull/ahead-behind), local branches
+(list/create/switch), credentials, and host verification are all public — see
+§ Public API surface for the full inventory, taken from the source rather than from
+this paragraph. What makes all of it possible is still the binary target and the
+build pipeline that produce it — the part nobody else ships, and the part every
+method above ultimately calls through.
 
 ## Status
 
@@ -22,7 +26,7 @@ decides whether the rest is possible at all.
 | `scripts/verify-no-spawn.sh` — the no-spawn / no-ucontext gate | **PASS, 6 targets, 0 failures**; also self-tested against positive and negative controls |
 | `--fetch-only` pre-gate | passes clean for all three slices, including cold download, checksum rejection and re-extract |
 | `--configure-only` pre-gate | libgit2 + libssh2 configure clean; all three slices verified |
-| `Package.swift` + `Sources/` | `Clibgit2` binary target, the build-shape surface, and the `GitRepository` actor — open / discover / clone / head / status / stage / commit / fetch / push / fastForwardPull / aheadBehind |
+| `Package.swift` + `Sources/` | `Clibgit2` binary target, the build-shape surface, and the `GitRepository` actor — open / discover / create / clone / head / status / stage / commit / fetch / push / fastForwardPull / aheadBehind / localBranches / currentBranchName / createBranch / switchBranch — plus `CloneOptions`, `Credential` / `CredentialProvider`, `HostVerifier`, `Author`, `GitError`, `RepositoryStatus` |
 | `Makefile` — `build` / `test` / `lint` + pipeline wrappers | present; all three exit 0 |
 | `Tests/` — 71 tests, 7 suites | pass; build-shape assertions read the linked binary, all repository tests run against local fixtures |
 | `LICENSES.md` | present — **read § LibXDiff is LGPL-2.1** |
@@ -309,6 +313,33 @@ hundred kilobytes would reproduce exactly the "looks like a bad key"
 misdiagnosis this package exists to prevent) and `no-deprecated` (libssh2 still
 calls OpenSSL 1.1-era APIs).
 
+### The full OpenSSL configure line, and closing the other dlopen surface
+
+`no-async` is one flag among many, all deliberate:
+
+```
+no-shared no-async no-tests no-apps no-docs no-engine no-module no-dso no-comp
+no-ssl3 no-ssl3-method no-weak-ssl-ciphers
+```
+
+| Flag | Why |
+|---|---|
+| `no-shared` | `.a` only — a dylib would have to be embedded and signed separately. |
+| `no-tests` / `no-apps` / `no-docs` | Nothing here ships the `openssl` CLI. |
+| `no-engine` | OpenSSL 3 uses providers; `ENGINE` is legacy dlopen surface. |
+| `no-module` / `no-dso` | **The other dlopen surface**, and the reason both were added. `no-engine` alone does not remove `crypto/dso/dso_dlfcn.c` — libcrypto still imports `_dlopen` via `dso_dlfcn.o` for its provider/module loader without these two flags. `no-module` makes the legacy provider **built-in** rather than dynamically loadable, so old PEM keys keep working — which is why `no-legacy` stays deliberately unset (see above). |
+| `no-comp` | TLS-level compression (CRIME); libssh2 compression is a separate switch and is also off. |
+| `no-ssl3` / `no-ssl3-method` / `no-weak-ssl-ciphers` | Nothing this package talks to needs them. |
+
+**`no-module`/`no-dso` were added after the fact, not designed in from the start.**
+Escribir's own Sortie 20 linked-binary criterion — `nm -u` over the shipped app
+binary, asserting no spawn *or dlopen* symbol reachable from the git engine — found
+`_dlopen` imported via `libcrypto-lib-dso_dlfcn.o` even with `no-engine` alone.
+`RECIPE_REVISION` moved 2 → 3 to invalidate the per-slice stamps that had been
+reusing the pre-flag OpenSSL builds, and `scripts/verify-no-spawn.sh` now bans
+`_dlopen` alongside the fork/exec family (§ The gate, check A above) — shipped as
+`v0.2.1`.
+
 ### Why the OpenSSL build is from source, and not `krzyzanowskim/OpenSSL`
 
 The plan told this sortie to seriously evaluate consuming
@@ -532,7 +563,7 @@ runs `nm -m` over every slice and makes four assertions:
 
 | | Assertion | Why |
 |---|---|---|
-| A | no `_fork` / `_vfork` / `_exec*` / `_posix_spawn*` | the exec-ssh transport must not be linked |
+| A | no `_fork` / `_vfork` / `_exec*` / `_posix_spawn*` / `_dlopen` | the exec-ssh transport must not be linked, and (since v0.2.1) neither may OpenSSL's provider/module loader |
 | B | no `_getcontext` / `_makecontext` / `_setcontext` / `_swapcontext` | ITMS-90338; proves `no-async` took |
 | C | `_git_libgit2_init`, `_libssh2_version`, `_libssh2_userauth_publickey_frommemory`, `_SSL_CTX_new` **are** present | absence of the bad thing is not presence of the good thing |
 | D | `git2_features.h` says `GIT_OPENSSL`, `GIT_SSH_LIBSSH2`, `GIT_SSH_LIBSSH2_MEMORY_CREDENTIALS`, `GIT_REGEX_BUILTIN`; not `GIT_SSH_EXEC`, not `GIT_GSSAPI` | catches a `-D` flag CMake accepted and ignored |
@@ -551,8 +582,8 @@ been cleaned; the same assertions run inline during the build.
 
 ## The Swift surface
 
-Small on purpose — the API for repositories, clones and commits belongs to later
-sorties. What exists is the answer to "what actually got linked":
+The build-identity surface — the answer to "what actually got linked", read from the
+binary rather than trusted from the recipe:
 
 ```swift
 SwiftRepositorio.libgit2Version        // Version, from git_libgit2_version()
@@ -562,6 +593,56 @@ SwiftRepositorio.minimumLibssh2Version // the 1.11.0 floor, and why
 SwiftRepositorio.buildDescription      // one line naming everything linked
 SwiftRepositorio.PinnedVersions        // what the build script was TOLD
 ```
+
+The repository, clone, commit, branch, and remote API is a separate, larger surface —
+see § Public API surface below for the full inventory.
+
+## Public API surface
+
+Every `public` declaration under `Sources/SwiftRepositorio/`, grouped by the file that
+declares it, current as of v0.2.1 — a description of the source, not a promise about
+the future of it:
+
+- **`GitRepository.swift`** — the actor itself. `open(at:)`, `discover(from:)`,
+  `create(at:bare:initialBranch:)`, `clone(from:to:options:)`, `head()`,
+  `isHeadUnborn()`, `isBare`, `isShallow`, `workingDirectory`, `status(options:)`, and
+  the nested `Head` type.
+- **`GitRepository+Branches.swift`** — local-branch primitives: `localBranches()`,
+  `currentBranchName()`, `createBranch(named:)`, `switchBranch(to:)`. All checkout
+  paths use `GIT_CHECKOUT_SAFE`, never `FORCE` — a working tree with local edits a
+  switch would have to discard is refused, not overwritten.
+- **`GitRepository+Write.swift`** — `stage(paths:)`, `commit(message:author:committer:)`.
+  No `stageAll` (§ There is no `stageAll`); `commit` has no default author or
+  committer (§ Both identities are required).
+- **`GitRepository+Remote.swift`** — `fetch(remote:options:)`,
+  `push(remote:branch:options:)`, `fastForwardPull(remote:options:)`,
+  `aheadBehind(local:upstream:)`, plus `AheadBehind`, `PullOutcome`, `PullError`. No
+  force-push path exists anywhere in this file, or this package.
+- **`CloneOptions.swift`** — `CloneOptions` (`bare`, `localStrategy`, `depth`,
+  `checkoutBranch`, `onProgress`), `CloneOptions.LocalStrategy`, `TransferProgress`.
+- **`Credentials.swift`** — `Credential` (`.plaintextOverTLS`, `.sshKeyInMemory`,
+  `.usernameOnly` — no case names a file path, ever), `CredentialKinds`, the
+  `CredentialProvider` protocol, `SingleCredentialProvider`.
+- **`HostVerifier.swift`** — `HostCertificate`, `HostVerification`, the `HostVerifier`
+  protocol, `FailClosedHostVerifier` (the default — rejects every host), and
+  `PinnedFingerprintVerifier`.
+- **`Author.swift`** — `Author` (name, email, and a written, non-normalised
+  `TimeZone` offset).
+- **`GitError.swift`** — `GitError`, carrying libgit2's message text verbatim.
+- **`RepositoryStatus.swift`** — `RepositoryStatus`, `RepositoryStatus.Change`,
+  `RepositoryStatus.Entry`, `StatusOptions`.
+- **`RemoteCallbacks.swift`** — `RemoteOptions` (progress, cancellation via
+  `isCancelled`, `hostVerifier`), `RemoteOperationError`.
+- **`BuildShape.swift`** / **`SwiftRepositorio.swift`** — `Version`, `Features`, and
+  the `SwiftRepositorio` enum's build-identity constants; see § The Swift surface
+  above.
+
+**No `PublicKey` type exists in this package.** Key text is carried as plain `String`
+fields on `Credential.sshKeyInMemory` — this package does no disk I/O and holds no
+key-material type of its own. (Escribir's own `Shared/PublicKey.swift`, in the *app*
+repository, is a separate, app-side type for its SSH-identity-import UI and is not
+part of this package's surface — do not confuse the two when reading Escribir's
+source alongside this one.)
 
 The split between the first four and `PinnedVersions` is the whole design. The
 first four read the binary; `PinnedVersions` records the recipe. A test that
