@@ -35,7 +35,7 @@
 #      "1.11.1_DEV" version string); hermetic find_library paths; host-path
 #      assertion
 # ---------------------------------------------------------------------------
-RECIPE_REVISION="2"
+RECIPE_REVISION="3"
 
 # ---------------------------------------------------------------------------
 # libgit2 — GPLv2 with a linking exception

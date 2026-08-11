@@ -79,7 +79,7 @@ fail() {
 # _posix_spawn_file_actions_init do not produce a false positive on a name we
 # did not mean to ban. vfork and the exec* family are included because they are
 # the same capability by another name.
-SPAWN_SYMBOLS='^(_fork|_vfork|_execve|_execv|_execvp|_execvP|_execl|_execle|_execlp|_posix_spawn|_posix_spawnp)$'
+SPAWN_SYMBOLS='^(_fork|_vfork|_execve|_execv|_execvp|_execvP|_execl|_execle|_execlp|_posix_spawn|_posix_spawnp|_dlopen)$'
 
 # --- B. forbidden ucontext symbols (ITMS-90338) ---------------------------
 UCONTEXT_SYMBOLS='^(_getcontext|_makecontext|_setcontext|_swapcontext)$'

@@ -657,6 +657,13 @@ build_openssl() {
 	#   no-shared  we want .a only; a dylib would have to be embedded + signed.
 	#   no-tests / no-apps / no-docs   nothing here ships the openssl CLI.
 	#   no-engine  OpenSSL 3 uses providers; ENGINE is legacy dlopen surface.
+	#   no-module / no-dso   the OTHER dlopen surface: provider/module loading
+	#              via crypto/dso/dso_dlfcn.c. Without these, libcrypto imports
+	#              _dlopen (dso_dlfcn.o) even with no-engine, and the app-side
+	#              no-spawn/no-dlopen gate (Escribir S20) fails on the linked
+	#              binary. no-module makes the legacy provider BUILT-IN instead
+	#              of dynamically loadable, so legacy PEM keys keep working —
+	#              which is why no-legacy stays deliberately NOT passed below.
 	#   no-comp    TLS-level compression (CRIME); libssh2 compression is a
 	#              separate switch and is also off.
 	#   no-ssl3 / no-ssl3-method / no-weak-ssl-ciphers   nothing we talk to.
@@ -693,6 +700,8 @@ build_openssl() {
 			no-apps \
 			no-docs \
 			no-engine \
+			no-module \
+			no-dso \
 			no-comp \
 			no-ssl3 \
 			no-ssl3-method \
@@ -1220,7 +1229,7 @@ libgit2 cmake:   USE_SSH=libssh2 USE_HTTPS=OpenSSL USE_SHA1=CollisionDetection
                  USE_SHA256=OpenSSL REGEX_BACKEND=builtin USE_GSSAPI=OFF
                  USE_NTLMCLIENT=OFF BUILD_CLI=OFF BUILD_TESTS=OFF
 libssh2 cmake:   CRYPTO_BACKEND=OpenSSL ENABLE_ZLIB_COMPRESSION=OFF
-openssl config:  no-shared no-async no-tests no-apps no-docs no-engine no-comp
+openssl config:  no-shared no-async no-tests no-apps no-docs no-engine no-module no-dso no-comp
                  no-ssl3 no-ssl3-method no-weak-ssl-ciphers
 
 GIT_SSH_EXEC:    not defined (guard applied: ${GUARD_PROCESS_SPAWN})
