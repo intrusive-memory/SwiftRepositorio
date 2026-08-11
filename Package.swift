@@ -72,7 +72,9 @@ let package = Package(
     // local sibling checkout with the xcframework built in place.
     .binaryTarget(
       name: "Clibgit2",
-      path: "artifacts/Clibgit2.xcframework"
+      url:
+        "https://github.com/intrusive-memory/SwiftRepositorio/releases/download/v0.1.0/Clibgit2.xcframework.zip",
+      checksum: "a024b99d44d1e51a770ebe47a9340b36dc9b118feffc8416c3fada56d1ab3042"
     ),
 
     .target(
