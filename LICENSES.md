@@ -120,6 +120,16 @@ I am not a lawyer and this is not advice. Flagging it is the correct action; a
 `LICENSES.md` that listed xdiff as "BSD-ish" alongside the others would have been
 the failure.
 
+**Resolution (2026-08-11, decided by the app's owner — Escribir D-9):** attribution
+plus an affirmative relink offer. Escribir's About panel carries the LGPL-2.1 notice
+(LibXDiff, © 2003 Davide Libenzi) and points here: this repository IS the offer — the
+LGPL-covered source is vendored in the pinned upstream tarballs, `scripts/build-xcframework.sh`
+byte-reproduces the shipped archive from them, and `artifacts/BUILD-PROVENANCE.txt`
+records the exact inputs. Anyone wishing to modify LibXDiff and relink can rebuild the
+xcframework with this pipeline and swap it into the package. Strict LGPL §6(b)
+(shipping Clibgit2 as a dynamic framework) was considered and not adopted; it remains
+the escalation path if the posture ever needs hardening.
+
 ## Export
 
 A bundled crypto library means the **app** carries the paperwork, not the package:
